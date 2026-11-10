@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Coweb Test Payment
  * Description: שער תשלום מדומה לבדיקות. מסמן הזמנה כשולמה בלי לפנות לשום סליקה חיצונית. מקומי: פתוח לכולם. staging: מנהלים בלבד. live: כבוי עד שמנהל מפעיל אותו ל-60 דקות, וגם אז רק למנהלים.
- * Version:     1.0.0
+ * Version:     1.1.0
  * Author:      coweb
  * Requires Plugins: woocommerce
  * Update URI:  false
@@ -10,7 +10,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'COWEB_TP_VERSION', '1.0.0' );
+define( 'COWEB_TP_VERSION', '1.1.0' );
 define( 'COWEB_TP_FILE', __FILE__ );
 define( 'COWEB_TP_ID', 'coweb_test_payment' );
 define( 'COWEB_TP_TEST_ORDER_META', '_coweb_test_order' );
@@ -92,6 +92,14 @@ function coweb_tp_can_use() {
 		default:
 			return coweb_tp_is_armed() && current_user_can( 'manage_woocommerce' );
 	}
+}
+
+/**
+ * האם מותר לחייב חידוש חודשי מדומה. החיוב רץ ברקע, בלי משתמש מחובר, ולכן הכלל לפי סביבה בלבד:
+ * מקומי ו-staging מותר, live אף פעם. כך מנוי שנפתח בבדיקה באתר חי לא יסומן כשולם בלי כסף.
+ */
+function coweb_tp_can_charge_renewal() {
+	return in_array( coweb_tp_environment(), array( 'local', 'staging' ), true );
 }
 
 /**

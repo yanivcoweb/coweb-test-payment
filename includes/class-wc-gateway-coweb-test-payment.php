@@ -9,7 +9,8 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 		$this->method_title       = 'Coweb Test Payment';
 		$this->method_description = 'שער בדיקות — מסמן את ההזמנה כשולמה בלי סליקה אמיתית. מי שרואה אותו תלוי בסביבה שבה האתר רץ.';
 		$this->has_fields         = false;
-		$this->supports           = array( 'products', 'refunds' );
+		// tokenization + coweb_recurring: כרטיס מדומה נשמר בתשלום הראשון, ו-Coweb Licensing מחייב אותו כל חודש.
+		$this->supports           = array( 'products', 'refunds', 'tokenization', 'coweb_recurring' );
 
 		$this->init_form_fields();
 		$this->init_settings();
@@ -52,6 +53,18 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 				'options'     => array(
 					'success' => 'תשלום מוצלח',
 					'failure' => 'תשלום נכשל',
+				),
+			),
+			'renewal_result' => array(
+				'title'       => 'תוצאת החיוב החודשי המדומה',
+				'type'        => 'select',
+				'default'     => 'success',
+				'description' => 'לחידושים של Coweb Licensing. "תוצאה לא ידועה" מדמה תקלת תקשורת עם חברת הסליקה: המנוי עוצר לבדיקה ולא מחויב שוב.',
+				'desc_tip'    => true,
+				'options'     => array(
+					'success'   => 'חיוב מוצלח',
+					'failure'   => 'חיוב נכשל',
+					'uncertain' => 'תוצאה לא ידועה',
 				),
 			),
 			'order_status'   => array(
@@ -144,6 +157,9 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 
 		$order->add_order_note( 'שולם דרך שער הבדיקות — ללא סליקה אמיתית. ' . coweb_tp_audit_label() );
 
+		// לקוח מחובר מקבל "כרטיס" מדומה, כדי שאפשר יהיה לחייב אותו בחידוש הבא.
+		$this->save_test_token( $order );
+
 		// זה מה שמפעיל את כל מה שקורה אחרי תשלום מוצלח:
 		// הפחתת מלאי, woocommerce_payment_complete, אינטגרציות חשבונית/ERP.
 		$order->payment_complete( 'TEST-' . $order->get_id() . '-' . time() );
@@ -173,6 +189,74 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 		}
 
 		return true;
+	}
+
+	/**
+	 * שומר כרטיס מדומה ללקוח (או משתמש בזה שכבר יש לו), ומסמן אותו בהזמנה
+	 * ב-_cwl_payment_token_id, כפי ש-Coweb Licensing מצפה.
+	 */
+	private function save_test_token( WC_Order $order ) {
+		$user = $order->get_customer_id();
+		if ( ! $user ) {
+			return;
+		}
+
+		$token = null;
+		foreach ( WC_Payment_Tokens::get_customer_tokens( $user, $this->id ) as $existing ) {
+			$token = $existing;
+			break;
+		}
+
+		if ( ! $token ) {
+			$token = new WC_Payment_Token_CC();
+			$token->set_token( 'test_' . bin2hex( random_bytes( 12 ) ) );
+			$token->set_gateway_id( $this->id );
+			$token->set_card_type( 'visa' );
+			$token->set_last4( '4242' );
+			$token->set_expiry_month( '12' );
+			$token->set_expiry_year( (string) ( (int) gmdate( 'Y' ) + 3 ) );
+			$token->set_user_id( $user );
+			$token->set_default( true );
+			$token->save();
+		}
+
+		$order->update_meta_data( '_cwl_payment_token_id', $token->get_id() );
+		$order->save();
+	}
+
+	/**
+	 * חיוב חודשי מדומה עבור Coweb Licensing. לא קורא ל-payment_complete: את זה עושה המנוע.
+	 *
+	 * @return array result = success | failure | uncertain
+	 */
+	public function coweb_charge_renewal( WC_Order $order, WC_Payment_Token $token ) {
+		if ( ! coweb_tp_can_charge_renewal() || $token->get_gateway_id() !== $this->id ) {
+			$order->add_order_note( 'חיוב חודשי מדומה נדחה — שער הבדיקות לא מחייב חידושים בסביבה הזו. ' . coweb_tp_audit_label() );
+
+			return array( 'result' => 'failure', 'error' => 'test_gateway_not_allowed' );
+		}
+
+		// כמו בתשלום רגיל: הסימון קודם, כדי שמיילים של ההזמנה יידעו שזו בדיקה.
+		$order->update_meta_data( COWEB_TP_TEST_ORDER_META, 'yes' );
+		$order->save();
+
+		$result = $this->get_option( 'renewal_result', 'success' );
+
+		if ( 'failure' === $result ) {
+			$order->add_order_note( 'סימולציית כשל בחיוב חודשי — שער הבדיקות.' );
+
+			return array( 'result' => 'failure', 'error' => 'test_declined' );
+		}
+
+		if ( 'uncertain' === $result ) {
+			$order->add_order_note( 'סימולציית תוצאה לא ידועה בחיוב חודשי — שער הבדיקות.' );
+
+			return array( 'result' => 'uncertain', 'error' => 'test_timeout' );
+		}
+
+		$order->add_order_note( 'חיוב חודשי דרך שער הבדיקות — ללא סליקה אמיתית.' );
+
+		return array( 'result' => 'success', 'transaction_id' => 'TEST-R-' . $order->get_id() . '-' . time() );
 	}
 
 	private function add_error_notice( $message ) {
