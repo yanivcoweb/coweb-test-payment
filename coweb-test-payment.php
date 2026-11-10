@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Coweb Test Payment
  * Description: שער תשלום מדומה לבדיקות. מסמן הזמנה כשולמה בלי לפנות לשום סליקה חיצונית. מקומי: פתוח לכולם. staging: מנהלים בלבד. live: כבוי עד שמנהל מפעיל אותו ל-60 דקות, וגם אז רק למנהלים.
- * Version:     1.1.0
+ * Version:     1.2.0
  * Author:      coweb
  * Requires Plugins: woocommerce
  * Update URI:  false
@@ -10,11 +10,13 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'COWEB_TP_VERSION', '1.1.0' );
+define( 'COWEB_TP_VERSION', '1.2.0' );
 define( 'COWEB_TP_FILE', __FILE__ );
 define( 'COWEB_TP_ID', 'coweb_test_payment' );
 define( 'COWEB_TP_TEST_ORDER_META', '_coweb_test_order' );
 define( 'COWEB_TP_ARMED_OPTION', 'coweb_test_payment_armed_until' );
+define( 'COWEB_TP_BLOCK_EMAILS_OPTION', 'coweb_tp_block_emails' );
+define( 'COWEB_TP_PAGE', 'coweb-test-payment' );
 define( 'COWEB_TP_OLD_PLUGIN', 'local-test-payment/local-test-payment.php' );
 
 register_activation_hook( __FILE__, 'coweb_tp_activate' );
@@ -123,6 +125,10 @@ function coweb_tp_settings_url() {
 	return admin_url( 'admin.php?page=wc-settings&tab=checkout&section=' . COWEB_TP_ID );
 }
 
+function coweb_tp_page_url() {
+	return admin_url( 'admin.php?page=' . COWEB_TP_PAGE );
+}
+
 function coweb_tp_action_url( $action ) {
 	return wp_nonce_url( admin_url( 'admin-post.php?action=' . $action ), $action );
 }
@@ -161,29 +167,114 @@ add_action( 'woocommerce_blocks_loaded', function () {
 } );
 
 /**
- * חסימת מיילים של WooCommerce על הזמנות בדיקה. המחלקה נטענת רק כשצריך מיילים,
- * לכן נרשמים על woocommerce_email ולא טוענים את WC()->mailer() בכל בקשה.
+ * האם לחסום מיילים אמיתיים בהזמנות בדיקה. ההגדרה בעמוד WooCommerce ← תשלום בדיקה.
+ * עד 1.2.0 זו הייתה תיבת "מיילים" במסך השער (ברירת מחדל: לא לשלוח). כל עוד לא נשמרה ההגדרה החדשה,
+ * היא נגזרת מהישנה: מי שסימן "שלח מיילים" ממשיך לשלוח, כל השאר חסומים.
  */
-add_action( 'woocommerce_email', function ( $mailer ) {
-	// מייל ההחזר החלקי מחליף את ה-id שלו רק בזמן השליחה, ולכן לא מופיע ברשימה.
-	$ids = array( 'customer_partially_refunded_order' );
+function coweb_tp_blocks_emails() {
+	$value = get_option( COWEB_TP_BLOCK_EMAILS_OPTION, null );
 
-	foreach ( $mailer->get_emails() as $email ) {
-		$ids[] = $email->id;
+	if ( null === $value ) {
+		return 'yes' !== coweb_tp_setting( 'send_emails', 'no' );
 	}
 
-	foreach ( array_unique( $ids ) as $id ) {
-		add_filter( 'woocommerce_email_enabled_' . $id, 'coweb_tp_filter_email_enabled', 10, 2 );
-	}
-} );
-
-function coweb_tp_filter_email_enabled( $enabled, $object ) {
-	if ( $enabled && coweb_tp_is_test_order( $object ) && 'yes' !== coweb_tp_setting( 'send_emails', 'no' ) ) {
-		return false;
-	}
-
-	return $enabled;
+	return 'yes' === $value;
 }
+
+/**
+ * חסימת מיילים של WooCommerce בהזמנות בדיקה. WooCommerce בונה את המייל כרגיל, והמייל עובר דרך wp_mail
+ * כדי שתוספי תיעוד (למשל CoWeb Outgoing Mail Archive) יראו אותו. pre_wp_mail עוצר אותו לפני השליחה,
+ * כך ששום שרת דואר לא מקבל אותו.
+ */
+add_filter( 'woocommerce_mail_callback', function ( $callback, $email ) {
+	if ( ! $email instanceof WC_Email || ! coweb_tp_is_test_order( $email->object ) || ! coweb_tp_blocks_emails() ) {
+		return $callback;
+	}
+
+	return function ( ...$args ) use ( $email ) {
+		return coweb_tp_send_blocked_email( $email, $args );
+	};
+}, PHP_INT_MAX, 2 );
+
+function coweb_tp_send_blocked_email( WC_Email $email, array $args ) {
+	$to = $args[0] ?? '';
+
+	$email->object->add_order_note(
+		sprintf( 'המייל "%s" אל %s לא נשלח: זו הזמנת בדיקה, ומיילים אמיתיים בהזמנות בדיקה חסומים.', $email->get_title(), is_array( $to ) ? implode( ', ', $to ) : $to )
+	);
+
+	// wp_mail שהוחלף על ידי תוסף אחר לא בהכרח מפעיל את pre_wp_mail, ואז אי אפשר לעצור אותו. לא קוראים לו בכלל.
+	if ( ! coweb_tp_wp_mail_is_core() ) {
+		return coweb_tp_blocked_result( $email, true );
+	}
+
+	coweb_tp_mail_blocking( true );
+
+	try {
+		return coweb_tp_blocked_result( $email, (bool) wp_mail( ...$args ) );
+	} finally {
+		coweb_tp_mail_blocking( false );
+	}
+}
+
+/**
+ * זוכר את התוצאה של מייל שנחסם עד ש-WooCommerce מסיים לטפל בו. בלי ערך: מחזיר את התוצאה ושוכח אותה.
+ */
+function coweb_tp_blocked_result( WC_Email $email, $result = null ) {
+	static $results = array();
+
+	$key = spl_object_id( $email );
+
+	if ( null !== $result ) {
+		$results[ $key ] = $result;
+
+		return $result;
+	}
+
+	$stored = $results[ $key ] ?? null;
+	unset( $results[ $key ] );
+
+	return $stored;
+}
+
+// WooCommerce מוסיף להזמנה "האימייל נשלח", וזה סותר את ההערה שלנו על מייל שנחסם. הערת כישלון (רשת הביטחון) נשארת.
+add_filter( 'woocommerce_email_log_add_order_note', function ( $enabled, $email_id, $email ) {
+	return $email instanceof WC_Email && true === coweb_tp_blocked_result( $email ) ? false : $enabled;
+}, 10, 3 );
+
+add_action( 'woocommerce_email_sent', function ( $success, $email_id, $email ) {
+	if ( $email instanceof WC_Email ) {
+		coweb_tp_blocked_result( $email );
+	}
+}, PHP_INT_MAX, 3 );
+
+function coweb_tp_mail_blocking( $set = null ) {
+	static $blocking = false;
+
+	if ( null !== $set ) {
+		$blocking = (bool) $set;
+	}
+
+	return $blocking;
+}
+
+function coweb_tp_wp_mail_is_core() {
+	$file = ( new ReflectionFunction( 'wp_mail' ) )->getFileName();
+
+	return wp_normalize_path( (string) realpath( $file ) ) === wp_normalize_path( (string) realpath( ABSPATH . WPINC . '/pluggable.php' ) );
+}
+
+// ראשון בתור: מחזיר true ו-wp_mail חוזר בלי לשלוח. תוספי תיעוד שרצים אחריו רושמים את הניסיון.
+add_filter( 'pre_wp_mail', function ( $return ) {
+	return coweb_tp_mail_blocking() ? true : $return;
+}, PHP_INT_MIN );
+
+// רשת ביטחון: אם תוסף אחר ביטל את העצירה, בלי נמענים PHPMailer נכשל עוד לפני שהוא מתחבר לשרת.
+add_action( 'phpmailer_init', function ( $phpmailer ) {
+	if ( coweb_tp_mail_blocking() ) {
+		$phpmailer->clearAllRecipients();
+	}
+}, PHP_INT_MAX );
 
 /**
  * סימון 🧪 ברשימת ההזמנות בניהול.
@@ -206,7 +297,8 @@ add_action( 'admin_post_coweb_test_payment_arm', function () {
 		update_option( COWEB_TP_ARMED_OPTION, time() + HOUR_IN_SECONDS, false );
 	}
 
-	wp_safe_redirect( coweb_tp_settings_url() );
+	// חוזרים למסך שממנו לחצו: מסך השער או עמוד ההגדרות.
+	wp_safe_redirect( wp_get_referer() ?: coweb_tp_settings_url() );
 	exit;
 } );
 
@@ -219,9 +311,105 @@ add_action( 'admin_post_coweb_test_payment_disarm', function () {
 
 	delete_option( COWEB_TP_ARMED_OPTION );
 
-	wp_safe_redirect( coweb_tp_settings_url() );
+	wp_safe_redirect( wp_get_referer() ?: coweb_tp_settings_url() );
 	exit;
 } );
+
+/**
+ * מצב השער לפי הסביבה, עם כפתורי ההפעלה באתר חי. מוצג במסך השער ובעמוד ההגדרות.
+ */
+function coweb_tp_render_status() {
+	$environment = coweb_tp_environment();
+
+	if ( 'local' === $environment ) {
+		$access = 'השער פתוח לכל מבקר.';
+	} elseif ( 'staging' === $environment ) {
+		$access = 'yes' === coweb_tp_setting( 'staging_public', 'no' )
+			? 'השער פתוח כרגע לכל מבקר (בדיקות לקוח).'
+			: 'השער פתוח רק למשתמש מחובר עם הרשאת ניהול חנות.';
+	} else {
+		$access = 'השער כבוי עד שמנהל מפעיל אותו ל-60 דקות, וגם אז רק משתמשים עם הרשאת ניהול חנות רואים אותו.';
+	}
+
+	echo '<div class="notice notice-info inline"><p><strong>סביבה שזוהתה: ' . esc_html( $environment ) . '.</strong> ' . esc_html( $access ) . '</p>';
+
+	if ( 'yes' !== coweb_tp_setting( 'enabled', 'yes' ) ) {
+		echo '<p><strong>השער כבוי בהגדרות השער.</strong></p>';
+	}
+
+	if ( 'live' === $environment ) {
+		echo '<p><strong>מצב: ' . esc_html( coweb_tp_is_armed() ? 'מופעל, ' . coweb_tp_armed_label() : 'כבוי' ) . '.</strong></p>';
+		echo '<p>';
+		printf( '<a class="button button-primary" href="%s">הפעל ל-60 דקות</a> ', esc_url( coweb_tp_action_url( 'coweb_test_payment_arm' ) ) );
+		printf( '<a class="button" href="%s">כבה</a>', esc_url( coweb_tp_action_url( 'coweb_test_payment_disarm' ) ) );
+		echo '</p>';
+	}
+
+	echo '</div>';
+}
+
+/**
+ * עמוד ההגדרות: WooCommerce ← תשלום בדיקה.
+ */
+add_action( 'admin_menu', function () {
+	add_submenu_page( 'woocommerce', 'Coweb Test Payment', 'תשלום בדיקה', 'manage_woocommerce', COWEB_TP_PAGE, 'coweb_tp_render_settings_page' );
+}, 60 );
+
+add_action( 'admin_init', function () {
+	register_setting(
+		'coweb_test_payment',
+		COWEB_TP_BLOCK_EMAILS_OPTION,
+		array(
+			'type'              => 'string',
+			'default'           => 'yes',
+			'sanitize_callback' => function ( $value ) {
+				return 'yes' === $value ? 'yes' : 'no';
+			},
+		)
+	);
+} );
+
+// options.php דורש manage_options כברירת מחדל. גם מנהל חנות צריך לשמור את העמוד.
+add_filter( 'option_page_capability_coweb_test_payment', function () {
+	return 'manage_woocommerce';
+} );
+
+add_filter( 'plugin_action_links_' . plugin_basename( COWEB_TP_FILE ), function ( $links ) {
+	array_unshift( $links, '<a href="' . esc_url( coweb_tp_page_url() ) . '">הגדרות</a>' );
+
+	return $links;
+} );
+
+function coweb_tp_render_settings_page() {
+	if ( ! current_user_can( 'manage_woocommerce' ) ) {
+		return;
+	}
+
+	echo '<div class="wrap"><h1>Coweb Test Payment</h1>';
+	settings_errors();
+	coweb_tp_render_status();
+
+	echo '<form method="post" action="options.php">';
+	settings_fields( 'coweb_test_payment' );
+	echo '<table class="form-table" role="presentation"><tr><th scope="row">מיילים בהזמנות בדיקה</th><td>';
+	printf(
+		'<label><input type="checkbox" name="%s" value="yes"%s> חסום מיילים אמיתיים בהזמנות בדיקה</label>',
+		esc_attr( COWEB_TP_BLOCK_EMAILS_OPTION ),
+		checked( coweb_tp_blocks_emails(), true, false )
+	);
+	echo '<p class="description">הזמנת בדיקה לא תשלח מיילים אמיתיים, לא ללקוח ולא לחנות. זה חשוב במיוחד ב-staging וב-live, שבהם השער יכול להיות פתוח.</p>';
+	echo '<p class="description">WooCommerce בונה את המיילים כרגיל, והם עוברים דרך wp_mail ונעצרים לפני השליחה. כך תוסף תיעוד כמו CoWeb Outgoing Mail Archive רושם אותם, ובהזמנה נרשמת הערה על כל מייל שנחסם.</p>';
+	echo '<p class="description">אם לא תסמן, המיילים יגיעו לנמענים האמיתיים של החנות והלקוח.</p>';
+	echo '</td></tr></table>';
+	submit_button();
+	echo '</form>';
+
+	printf(
+		'<p>שאר ההגדרות של השער (הפעלה, כותרת, תוצאת הסליקה, החיוב החודשי, סטטוס הזמנה, בדיקות לקוח ב-staging) נמצאות ב-<a href="%s">WooCommerce ← הגדרות ← תשלומים ← Coweb Test Payment</a>.</p>',
+		esc_url( coweb_tp_settings_url() )
+	);
+	echo '</div>';
+}
 
 /**
  * באנר תזכורת בדשבורד, כדי שלא תשכח שהשער דלוק.
