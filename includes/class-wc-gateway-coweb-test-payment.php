@@ -82,12 +82,15 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 				'default'     => 'no',
 				'description' => 'ברירת המחדל ב-staging היא מנהלים בלבד. האפשרות לא משפיעה על live.',
 			),
-			'send_emails'    => array(
-				'title'       => 'מיילים',
-				'type'        => 'checkbox',
-				'label'       => 'שלח מיילים של WooCommerce גם על הזמנות בדיקה',
-				'default'     => 'no',
-				'description' => 'ברירת המחדל היא לא לשלוח. אם תסמן, המיילים יגיעו לנמענים האמיתיים של החנות והלקוח.',
+			// ההגדרה הישנה send_emails נשארת שמורה רק כדי לגזור ממנה את ברירת המחדל של ההגדרה החדשה.
+			'emails'         => array(
+				'title'       => 'מיילים בהזמנות בדיקה',
+				'type'        => 'title',
+				'description' => sprintf(
+					'ההגדרה עברה לעמוד <a href="%s">WooCommerce ← תשלום בדיקה</a>. כרגע: %s.',
+					esc_url( coweb_tp_page_url() ),
+					coweb_tp_blocks_emails() ? 'מיילים אמיתיים בהזמנות בדיקה חסומים' : 'מיילים בהזמנות בדיקה נשלחים לנמענים האמיתיים'
+				),
 			),
 		);
 	}
@@ -100,29 +103,7 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 	}
 
 	public function admin_options() {
-		$environment = coweb_tp_environment();
-
-		if ( 'local' === $environment ) {
-			$access = 'השער פתוח לכל מבקר.';
-		} elseif ( 'staging' === $environment ) {
-			$access = 'yes' === $this->get_option( 'staging_public' )
-				? 'השער פתוח כרגע לכל מבקר (בדיקות לקוח).'
-				: 'השער פתוח רק למשתמש מחובר עם הרשאת ניהול חנות.';
-		} else {
-			$access = 'השער כבוי עד שמנהל מפעיל אותו ל-60 דקות, וגם אז רק משתמשים עם הרשאת ניהול חנות רואים אותו.';
-		}
-
-		echo '<div class="notice notice-info inline"><p><strong>סביבה שזוהתה: ' . esc_html( $environment ) . '.</strong> ' . esc_html( $access ) . '</p>';
-
-		if ( 'live' === $environment ) {
-			echo '<p><strong>מצב: ' . esc_html( coweb_tp_is_armed() ? 'מופעל, ' . coweb_tp_armed_label() : 'כבוי' ) . '.</strong></p>';
-			echo '<p>';
-			printf( '<a class="button button-primary" href="%s">הפעל ל-60 דקות</a> ', esc_url( coweb_tp_action_url( 'coweb_test_payment_arm' ) ) );
-			printf( '<a class="button" href="%s">כבה</a>', esc_url( coweb_tp_action_url( 'coweb_test_payment_disarm' ) ) );
-			echo '</p>';
-		}
-
-		echo '</div>';
+		coweb_tp_render_status();
 
 		echo '<div class="notice notice-warning inline"><p><strong>חשוב לדעת:</strong> השער מדלג רק על הסליקה. הפחתת מלאי, נתוני Analytics ואינטגרציות חשבונית/ERP רצים על הזמנת בדיקה כמו על הזמנה אמיתית. התראות מלאי ומיילים שלא קשורים להזמנה (למשל חשבון חדש) ממשיכים להישלח גם כשמיילי ההזמנה חסומים.</p></div>';
 
