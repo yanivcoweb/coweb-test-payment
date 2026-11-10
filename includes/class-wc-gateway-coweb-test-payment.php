@@ -18,7 +18,15 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 		$this->title       = $this->get_option( 'title' );
 		$this->description = $this->get_option( 'description' );
 
-		add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'process_admin_options' ) );
+		// אין כאן woocommerce_update_options_payment_gateways_{id}: ההגדרות נשמרות רק בעמוד WooCommerce ← תשלום בדיקה.
+		// המסך של WooCommerce לא מציג את השדות, ושמירה ממנו הייתה מכבה את התיבות שלא נשלחו.
+	}
+
+	/**
+	 * מסך התשלומים של WooCommerce (כפתור "ניהול") מוביל לעמוד ההגדרות של התוסף.
+	 */
+	public function get_settings_url() {
+		return coweb_tp_page_url();
 	}
 
 	public function init_form_fields() {
@@ -49,7 +57,6 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 				'type'        => 'select',
 				'default'     => 'success',
 				'description' => 'בחר "כשל" כדי לבדוק את מסלול התשלום הכושל.',
-				'desc_tip'    => true,
 				'options'     => array(
 					'success' => 'תשלום מוצלח',
 					'failure' => 'תשלום נכשל',
@@ -60,7 +67,6 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 				'type'        => 'select',
 				'default'     => 'success',
 				'description' => 'לחידושים של Coweb Licensing. "תוצאה לא ידועה" מדמה תקלת תקשורת עם חברת הסליקה: המנוי עוצר לבדיקה ולא מחויב שוב.',
-				'desc_tip'    => true,
 				'options'     => array(
 					'success'   => 'חיוב מוצלח',
 					'failure'   => 'חיוב נכשל',
@@ -72,7 +78,6 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 				'type'        => 'select',
 				'default'     => 'default',
 				'description' => 'השאר בברירת מחדל כדי לקבל בדיוק את אותו מסלול כמו סליקה אמיתית.',
-				'desc_tip'    => true,
 				'options'     => $statuses,
 			),
 			'staging_public' => array(
@@ -81,16 +86,6 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 				'label'       => 'פתח את השער לכל מבקר בסביבת staging',
 				'default'     => 'no',
 				'description' => 'ברירת המחדל ב-staging היא מנהלים בלבד. האפשרות לא משפיעה על live.',
-			),
-			// ההגדרה הישנה send_emails נשארת שמורה רק כדי לגזור ממנה את ברירת המחדל של ההגדרה החדשה.
-			'emails'         => array(
-				'title'       => 'מיילים בהזמנות בדיקה',
-				'type'        => 'title',
-				'description' => sprintf(
-					'ההגדרה עברה לעמוד <a href="%s">WooCommerce ← תשלום בדיקה</a>. כרגע: %s.',
-					esc_url( coweb_tp_page_url() ),
-					coweb_tp_blocks_emails() ? 'מיילים אמיתיים בהזמנות בדיקה חסומים' : 'מיילים בהזמנות בדיקה נשלחים לנמענים האמיתיים'
-				),
 			),
 		);
 	}
@@ -102,12 +97,13 @@ class WC_Gateway_Coweb_Test_Payment extends WC_Payment_Gateway {
 		return parent::is_available() && coweb_tp_can_use();
 	}
 
+	/**
+	 * המסך הישן מפנה לעמוד ההגדרות (ראו admin_init בקובץ הראשי). אם בכל זאת הגיעו לכאן, רק קישור, בלי שדות ובלי כפתור שמירה.
+	 */
 	public function admin_options() {
-		coweb_tp_render_status();
+		$GLOBALS['hide_save_button'] = true;
 
-		echo '<div class="notice notice-warning inline"><p><strong>חשוב לדעת:</strong> השער מדלג רק על הסליקה. הפחתת מלאי, נתוני Analytics ואינטגרציות חשבונית/ERP רצים על הזמנת בדיקה כמו על הזמנה אמיתית. התראות מלאי ומיילים שלא קשורים להזמנה (למשל חשבון חדש) ממשיכים להישלח גם כשמיילי ההזמנה חסומים.</p></div>';
-
-		parent::admin_options();
+		printf( '<p>ההגדרות של השער עברו לעמוד <a href="%s">WooCommerce ← תשלום בדיקה</a>.</p>', esc_url( coweb_tp_page_url() ) );
 	}
 
 	public function process_payment( $order_id ) {
